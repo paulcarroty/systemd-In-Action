@@ -101,7 +101,7 @@ $ busctl call org.freedesktop.timedate1 /org/freedesktop/timedate1
 ...
 
 ```
-Как видим, все работает. Тепер вернем время вспять с помощью dbus-send:
+Как видим, все работает. Тепер вернем время вспять с помощью `dbus-send`:
 ```
 # dbus-send --print-reply --system --type=method_call --dest=org.freedesktop.timedate1 /org/freedesktop/timedate1 org.freedesktop.timedate1.SetTime int64:$((-3600*1000*1000))  boolean:true boolean:false
 ```
