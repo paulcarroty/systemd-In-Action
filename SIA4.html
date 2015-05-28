@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="generator" content="pandoc">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title></title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <!--[if lt IE 9]>
+    <script src="http://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+  <![endif]-->
+</head>
+<body>
+<h3 id="journal-">1. Journal, продолжение</h3>
+<p>Приветствуем всех. Эту часть серии мы начнем с опровержения очередного мифа о хрупкости логов <code>Journal</code>. Удивительно, но много людей верят, что при малейшем повреждении файлов логи будет невозможно использовать в дальнейшем. Давайте посмотрим как обстоят дела в реальном мире.<br />Для начала проверим целостность системных логов с помощью утилиты <code>journalctl</code>:</p>
+<pre><code># journalctl --verify
+PASS: /run/log/journal/fe39ba83b9244251b1704fc655fbff2f/system.journal
+0015d0: invalid data hash table item (290/233016) head_hash_offset: b5d9a2492d2da8f7
+0015d0: invalid object contents: Bad message
+File corruption detected at /var/log/journal/fe39ba83b9244251b1704fc655fbff2f/system.journal:0015d0 (of 8388608 bytes, 0%).
+FAIL: /var/log/journal/fe39ba83b9244251b1704fc655fbff2f/system.journal (Bad message)</code></pre>
+<p>Журнал поврежден нами намеренно. Простейший путь получить целостные логи - рестарт машины, при котором <code>journal</code> получит новые системные сообщения.<br />Проверим целостность:</p>
+<pre><code># cd /var/log/journal/$(&lt; /etc/machine-id )
+# l
+total 8.1M
+drwxr-sr-x+ 2 root systemd-journal 4.0K Feb 21 17:50 .
+drwxr-sr-x+ 4 root systemd-journal 4.0K Feb 19 19:40 ..
+-rw-r-x---+ 1 root systemd-journal 8.0M Feb 21 17:50 system.journal
+# journalctl --verify
+PASS: /var/log/journal/fe39ba83b9244251b1704fc655fbff2f/system.journal</code></pre>
+<p>Проверка успешна, как и ожидалось. Дальше экспортируем бинарный файл в текст в формате &quot;одно поле на строку&quot;:</p>
+<pre><code># journalctl -o export &gt; uncorrupted</code></pre>
+<p>Теперь намеренно повреждаем файл system.journal, записав в него 1 килобайт случайных данных:</p>
+<pre><code># dd if=/dev/urandom of=/var/log/journal/fe39ba83b9244251b1704fc655fbff2f/system.journal bs=1K count=1 seek=10 conv=notrunc
+1+0 records in
+1+0 records out
+1024 bytes (1.0 kB) copied, 0.0022644 s, 452 kB/s</code></pre>
+<p>Экспортируем данные еще раз:</p>
+<pre><code>#  journalctl -o export &gt; corrupted
+# l corrupted
+-rw-r--r--. 1 root root 871K Feb 21 17:53 corrupted</code></pre>
+<p>Экспорт прошел успешно и на выходе мы получили файл ненулевой длины. Сравним поврежденный и неповрежденный файлы в текстовом формате:</p>
+<pre><code>$ diff -u uncorrupted corrupted
+--- uncorrupted 2015-02-21 17:52:12.701000000 +0000
++++ corrupted   2015-02-21 17:53:30.576000000 +0000
+@@ -25526,3 +25526,16 @@
+ _SYSTEMD_UNIT=session-3.scope
+ _SOURCE_REALTIME_TIMESTAMP=1424541030255833
+
++__CURSOR=s=00000000000000000000000000000000;i=560f;b=ca178527e7014a6c868084dac3960dd2;m=8d4be3a;t=50f9cd5ee7c96;x=fef0f211c7d6b5b0
++__REALTIME_TIMESTAMP=1424541162044566
++__MONOTONIC_TIMESTAMP=148160058
++_BOOT_ID=ca178527e7014a6c868084dac3960dd2
++_MACHINE_ID=fe39ba83b9244251b1704fc655fbff2f
++_HOSTNAME=systemd.cf
++_TRANSPORT=kernel
++PRIORITY=5
++SYSLOG_FACILITY=0
++SYSLOG_IDENTIFIER=kernel
++_SOURCE_MONOTONIC_TIMESTAMP=148159245
++MESSAGE=random: nonblocking pool is initialized</code></pre>
+<p>При повреждении у нас потерялась только одна запись, а основная часть остается доступной благодаря встроенной проверки хешей бинарных логов. Тут возникает логичный вопрос: что делать дальше и как восстановить утерянную запись или записи? Ответ - ничего, как видно выше journalctl при чтении восстанавливает все что может, так что отдельной операции восстановления просто не требуется. Если вам нужна дополнительная устойчивость, используйте RAID, snapshots и т.д.<br />Миф опровергнут. Больше информации вы можете найти в <code>man journalctl</code>, <code>man systemd.journal-fields</code>.</p>
+<h3 id="---">2. Передача и прием логов</h3>
+<p>Дальше поговорим о важной функции <code>journal</code>, которую мы упустили в предыдущей части — прием и передача логов. Для этого у нас есть три утилиты, встроенные в <code>journal</code>: <code>systemd-journal-remote</code>, <code>systemd-journal-gatewayd</code> и <code>systemd-journal-upload</code>.<br />Cуществуют два способа передачи логов. <em>Первый</em> — когда соединение инициирует машина, которая принимает логи: <code>systemd-journal-remote</code> на этой машине инициирует соединение с демоном <code>systemd-journal-gatewayd</code> на машине, которая отдает логи. И второй, когда все наоборот: клиент отдает логи на сервер и на клиенте запускается сервис <code>systemd-journal-upload</code> для передачи логов, а на сервере <code>systemd-journal-remote</code> для приема.</p>
+<p>Продемонстрируем первый способ. Для начала запустим на сервере <code>systemd-remote-gatewayd</code>, который являет собой простой http-сервер отдающий нам логи с помощью HTTP-запросов.</p>
+<pre><code>server: # systemctl start systemd-journal-gatewayd.socket
+client: $ curl -H&quot;Accept: text/plain&quot; &quot;http://77.41.63.43:19531/entries?boot&quot; &gt; remote-current-boot-export</code></pre>
+<p>Итак, мы получили все сообщения с момента последней загрузки в текстовом формате. Попробуем получить логи в формате предназначенном для экспорта. Для этого сменим заголовок следующим образом:</p>
+<pre><code>$  curl -H&quot;Accept: application/vnd.fdo.journal&quot; &quot;http://77.41.63.43:19531/entries?boot&quot; &gt; remote-current-boot-export
+ % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100 15.1M    0 15.1M    0     0   918k      0 --:--:--  0:00:16 --:--:--  930k</code></pre>
+<p>Теперь получим все логи с удаленной машины с помощью <code>systemd-journal-remote</code>:</p>
+<pre><code># lib/systemd/systemd-journal-remote --url=http://77.41.63.43:19531
+Received 0 descriptors
+Spawning curl http://77.41.63.43:19531/entries...
+/var/log/journal/remote/remote-77.41.63.43:19531.journal: Successfully rotated journal
+/var/log/journal/remote/remote-77.41.63.43:19531.journal: Successfully rotated journal</code></pre>
+<p>Читать логи journal с директории удобно с помощью команды <code># journalctl -d /path/to/directory</code>. В <code>systemd-journal-remote</code> также есть удобный параметр <code>--split-mode</code>, который позволяет указывать как именно нужно формировать файлы журнала. По умолчанию, разбиение файлов делается по <code>machine-id</code>.<br />Также нужно вспомнить об авторизации: в данном случае мы ее не используем ради простоты демонстрации, как и поддержку https.</p>
+<p>Перейдем к <em>второму</em> способу передачи логов. Напомним, что в первом способе сервер забирал логи с клиента, здесь же все будет наоборот.<br />Перед запуском <code>systemd-journal-remote</code> посмотрим в его конфигурационный файл <code>/etc/systemd/journal-remote.conf</code>:</p>
+<pre><code>[Remote]
+# SplitMode=host
+# ServerKeyFile=/etc/ssl/private/journal-remote.pem
+# ServerCertificateFile=/etc/ssl/certs/journal-remote.pem
+# TrustedCertificateFile=/etc/ssl/ca/trusted.pem</code></pre>
+<p>Как видно, по умолчанию файлы journal разбиваются по <code>machine-id</code>; также есть настройки аутентификации по ключу.<br />Для запуска передачи логов уже есть готовый юнит <code>systemd-journal-upload.service</code>, нам всего лишь остается указать хост в конфигурационном файле(<code>/etc/systemd/system/journal-upload.conf</code>), на который собственно мы хотим передавать данные:</p>
+<pre><code>[Upload]
+URL= http://systemd.cf:19532
+# ServerKeyFile=/etc/ssl/private/journal-upload.pem
+# ServerCertificateFile=/etc/ssl/certs/journal-upload.pem
+# TrustedCertificateFile=/etc/ssl/ca/trusted.pem</code></pre>
+<p>Запускаем сервис:</p>
+<pre><code># systemctl start systemctl-journal-upload</code></pre>
+<p>Посмотрим в логи клиента и сервера:</p>
+<pre><code>фев 21 21:35:36 server-9-20 systemd[1]: Starting Journal Remote Upload Service...</code></pre>
+<pre><code>Feb 21 18:30:10 systemd.cf systemd[1]: Listening on Journal Remote Sink Socket.
+Feb 21 18:30:10 systemd.cf systemd[1]: Starting Journal Remote Sink Socket.</code></pre>
+<p>Как видим все работает. Рекомендуется также изучить <code>man systemd-journald</code>, <code>man systemd-journal-upload</code>, <code>man systemd-journal-remote</code>, <code>systemd-journal-gatewayd</code>.</p>
+<h3 id="--c--systemd">3. Настройка сети c помощью systemd</h3>
+<p>Дальше мы перейдем к <code>systemd-networkd</code> — настройке сети в формате и духе systemd. Конфигурационные файлы <code>networkd</code> расположены в директории <code>/etc/systemd/network</code>. <code>Networkd</code> имеет три типа конфигурационных файлов: <code>*.link,</code> <code>*.network</code> и <code>*.netdev</code>.<br />Файлы настройки с расширением <code>.link</code> описывают физические параметры интерфейсов — каждый файл описывает один интерфейс: MAC-адресс, имя интерфейса, MTU, и прочие параметры, которые не относятся к сетевым. Эти файлы считываются каждый раз одним из обработчиков udev при запуске или перенастройке системы.<br />Файлы с расширением <code>.network</code> считываются непосредственно демоном <code>networkd</code> и содержат сетевые параметры интерфейсов: IP-адреса, маршруты, шлюзы, DNS-сервера и прочее.<br />И, наконец, файлы <code>*.netdev</code> служат для описания виртуальных интерфейсов.</p>
+<p>Для демонстрации работы <code>networkd</code> мы выполним перевод конфигурации нашей машины с legacy sysv-initscript <code>/etc/init.d/network</code> на <code>networkd</code>. Напомним, что мы используем Fedora 21, systemd 219 и статическую конфигурацию сети:</p>
+<pre><code>$ ip addr
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host
+       valid_lft forever preferred_lft forever
+2: eth0: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether 04:01:40:23:1f:01 brd ff:ff:ff:ff:ff:ff
+    inet 188.166.46.238/18 brd 188.166.63.255 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 2a03:b0c0:2:d0::69:7001/64 scope global
+       valid_lft forever preferred_lft forever
+    inet6 fe80::601:40ff:fe23:1f01/64 scope link
+       valid_lft forever preferred_lft forever
+3: eth1: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether 04:01:40:23:1f:02 brd ff:ff:ff:ff:ff:ff
+    inet 10.133.248.54/16 brd 10.133.255.255 scope global eth1
+       valid_lft forever preferred_lft forever
+    inet6 fe80::601:40ff:fe23:1f02/64 scope link
+       valid_lft forever preferred_lft forever</code></pre>
+<p>Выведем список интерфейсов, которые находятся под управлением <code>networkd</code> с помощью утилиты <code>networkctl</code>:</p>
+<pre><code>$ networkctl
+IDX LINK             TYPE               OPERATIONAL SETUP
+  1 lo               loopback           n/a         n/a
+  2 eth0             ether              n/a         n/a
+  3 eth1             ether              n/a         n/a</code></pre>
+<p>Мы увидели только список интерфейсов и их типов, так как сервис <code>networkd</code> у нас пока не запущен. После запуска перед нами предстанет немного другая картина:</p>
+<pre><code># systemctl start systemd-networkd
+# networkctl
+IDX LINK             TYPE               OPERATIONAL SETUP
+  1 lo               loopback           carrier     unmanaged
+  2 eth0             ether              routable    unmanaged
+  3 eth1             ether              routable    unmanaged
+
+3 links listed.</code></pre>
+<p><code>Unmanaged</code> говорит нам, что данный интерфейс пока не находится под управлением networkd, который вполне свободно допускает подобную практику. Посмотрим сетевые параметры интерфейсов, чтобы перенести их в конфигурацию networkd:</p>
+<pre><code># cat /etc/sysconfig/network-scripts/ifcfg-eth0
+DEVICE=&#39;eth0&#39;
+TYPE=Ethernet
+BOOTPROTO=none
+ONBOOT=&#39;yes&#39;
+HWADDR=04:01:40:23:1f:01
+IPADDR=188.166.46.238
+NETMASK=255.255.192.0
+GATEWAY=188.166.0.1
+NM_CONTROLLED=&#39;yes&#39;
+IPV6INIT=yes
+IPV6ADDR=2A03:B0C0:0002:00D0:0000:0000:0069:7001/64
+IPV6_DEFAULTGW=2A03:B0C0:0002:00D0:0000:0000:0000:0001
+IPV6_AUTOCONF=no
+DNS1=2001:4860:4860::8844
+DNS2=2001:4860:4860::8888
+DNS3=8.8.8.8</code></pre>
+<p>Для дистрибутивов, отличных от Red Hat-based эти конфигурационные файлы будут выглядеть иначе, но скорее всего нужную информацию можно получить без проблем. В текущей конфигурации интерфейс <code>eth0</code> используется для доступа в интернет, а <code>eth1</code> - в локальную сеть. Также рекомендуем перед запуском networkd переместить эти конфигурационные файлы в другую директорию, так как некоторые правила udev cчитывают их.</p>
+<p>Перейдем к созданию link-файлов. У нас уже есть дефолтный link-файл <code>/lib/systemd/network/99-default.link</code>, в котором настраивается политики назначения MAC-адреса и именования сетевых интерфейсов.</p>
+<pre><code>[Link]
+NamePolicy=kernel database onboard slot path
+MACAddressPolicy=persistent</code></pre>
+<p>Создадим link-файлы для каждого интерфейса, где укажем интерфейсы и MAC-адреса:</p>
+<pre><code>cat /etc/systemd/network/90-external.link
+[Match]
+MACAddress=04:01:40:23:1f:01
+[Link]
+Name=eth-external</code></pre>
+<pre><code>cat /etc/systemd/network/90-internal.link
+[Match]
+MACAddress=04:01:40:23:1f:02
+[Link]
+Name=eth-inner</code></pre>
+<p>Чтобы сетевые интерфейсы работали под управлением <code>networkd</code>, нам также необходимы конфигурационные файлы <code>*.network</code>:</p>
+<pre><code>cat eth-external.network
+[Match]
+Name= eth-outer
+[Network]
+DHCP=no
+Adress=188.166.46.238/18
+Adress=2A03:B0C0:0002:00D0:0000:0000:0000:0069:7001/64
+Gateway=188.166.0.1
+Gateway= 2A03:B0C0:0002:00D0:0000:0000:0000:0000:0001
+DNS=2001:4860:4860:8844
+DNS=2001:4860:4860:8888
+DNS=8.8.8.8</code></pre>
+<pre><code>cat eth-internal.network
+[Match]
+Name=eth-inner
+[Network]
+Address=10.133.248.54/16</code></pre>
+<p>Конфигурация готова, дальше остается отключить дефолтный сервис <code>network</code> и включить автозагрузку сервиса <code>networkd</code>:</p>
+<pre><code># systemctl disable network &amp;&amp; systemclt enable networkd.</code></pre>
+<p>Для уверенности, что данная конфигурация будет стабильно работать, перезапустим машину и посмотрим работает ли сеть:</p>
+<pre><code>$ ping systemd.cf
+PING systemd.cf (188.166.46.238) 56(84) bytes of data.
+64 bytes from systemd.cf (188.166.46.238): icmp_seq=6 ttl=56 time=48.7 ms
+64 bytes from systemd.cf (188.166.46.238): icmp_seq=7 ttl=56 time=48.7 ms
+64 bytes from systemd.cf (188.166.46.238): icmp_seq=8 ttl=56 time=48.4 ms</code></pre>
+<p>Ура, мы успешно настроили сеть с помощью networkd!</p>
+<pre><code>$ networkctl
+IDX LINK             TYPE               OPERATIONAL SETUP
+  1 lo               loopback           n/a         n/a
+  2 eth-outer        ether              routable    configured
+  3 eth-inner        ether              routable    configured</code></pre>
+<p>Теперь пришла пора обратить внимание на <code>systemd-resolved</code> - кеширующий DNS-сервер, точнее прослойка между glibc и DNS-серверами.<br />Его конфигурационный файл <code>/run/systemd/resolve/resolve.conf</code> можно использовать только как симлинк к <code>/etc/resolv.conf</code>, так что изначально он не влияет на сетевую подсистему.<br />Запустим <code>resolved</code> и покажем как его можно использовать в качестве кеширующего резолвера:</p>
+<pre><code># systemctl enable systemd-resolvd &amp;&amp; systemctl start systemd-resolvd</code></pre>
+<p>Зделаем симлинк на <code>/etc/resolv.conf</code>:</p>
+<pre><code># ln -sf /run/systemd/resolve/resolve.conf /etc/resolve.conf</code></pre>
+<p>В отличие от таких программ как <code>dnsmasq</code>, <code>resolved</code> не является DNS-proxy - он не представляет виртуальный DNS-сервер, к которому можно отправлять запросы. Вместо этого он предоставляет nss-модуль, который встраивается в glibc, и позволяет любой программе использующей glibc, использовать кеш запросов. Управление осуществляется с помощью файла <code>nssswitch.conf</code> в секции hosts:</p>
+<pre><code>hosts: files dns myhostname mymashines</code></pre>
+<p>Краткое пояснение: <code>Files</code> - считывание с <code>/etc/hosts</code>, <code>dns</code> - встроеный glibc-резолвер c <code>resolv.conf</code>, <code>myhostname</code>&amp;<code>mymashine</code> - nss модули поставляемые вместе с systemd.</p>
+<p><code>myhostname</code> - резолвит строку <code>localhost</code> и имя хоста, а <code>mymachines</code> ресолвит имена контейнеров и их адреса виртуальных интерфейсов.</p>
+<p>Для использования <code>resolved</code> мы должны заменить модуль <code>dns</code> на <code>resolve</code>. Давайте проверим:</p>
+<pre><code>$ getenv hosts goo.gl
+2a00:1450:4001:80f::1009 goo.gl</code></pre>
+<p>Мы получили IP-адрес с ~1с задержкой. При повторном запуске она должна исчезнуть - это означает, что кеш работает и адрес получается без помощи DNS-запроса.<br />Более подробную информацию вы можете получить используя <code>man systemd-networkd</code>, <code>man systemd.link</code>, <code>man systemd.network</code>, <code>man systemd.netdev</code>, <code>man systemd-resolved</code>.</p>
+<h3 id="busctl-----dbus.">4. Busctl и базовая работа с dbus.</h3>
+<p>Дальше мы переходим к обзору небольших дополнительных утилит в systemd. У многих людей возникает мысль: &quot;Зачем нужно столько утилит: <code>timedated</code>, <code>hostnamed</code>, <code>localed</code> и прочих? Они же написаны явно от нечего делать.&quot; На самом деле подобные демоны раньше присутствовали в KDE: там был свой особый демон с поддержкой dbus и которому передавались различные параметры. Сейчас есть множество приложений, которые используют dbus в своей работе, также не можем не упомянуть <code>policykit</code> - менеджер прав доступа, который работает с dbus-вызовами и может принимать или отклонять их.<br />Зачем все это нужно? Дело в том, что традиционный подход в виде suid-обертки или вообще без нее, требующий указания пароля суперпользователя - далеко не идеал. Например, для того чтобы сменить hostname DE просто делало форк скорее всего <code>kdesudo hostname</code>, этот процесс спрашивал пароль суперпользователя и в успешном случае все работало. Не слишком удобно, не так ли?<br />Эта проблема решается с помощью микродемонодов, которые вы наблюдали раньше в составе systemd. Точнее не совсем демоны, потому что они активируются с помощью dbus и не работают все время.</p>
+<p>Для начала мы продемонстрируем как обращаться к dbus-объектам и как устроена иерархия методов на dbus-шине. Для упрощения жизни у нас есть удобная утилита <code>busctl</code>, которая выгодно отличается от страшных на вид существующих аналогов предоставляющих доступ к dbus. В наших примерах мы будем также использовать утилиту dbus-send, которая есть почти везде. Для начала давайте получим список методов и свойств, предоставляемых главным обьектом systemd — <code>org.freedesktop.systemd1</code>:</p>
+<pre><code>$ busctl introspect org.freedesktop.systemd1 /org/freedesktop/systemd1
+NAME                                TYPE      SIGNATURE        RESULT/VALUE
+org.freedesktop.DBus.Introspectable interface -                -
+.Introspect                         method    -                s
+org.freedesktop.DBus.Peer           interface -                -
+.GetMachineId                       method    -                s
+.Ping                               method    -                -
+org.freedesktop.DBus.Properties     interface -                -
+.Get                                method    ss               v
+.GetAll                             method    s                a{sv}
+.Set                                method    ssv              -
+.PropertiesChanged                  signal    sa{sv}as         -
+org.freedesktop.systemd1.Manager    interface -                -
+.AddDependencyUnitFiles             method    asssbb           a(sss)
+.CancelJob                          method    u                -
+.ClearJobs                          method    -                -
+.CreateSnapshot                     method    sb               o
+.DisableUnitFiles                   method    asb              a(sss)
+.Dump                               method    -                s
+.EnableUnitFiles                    method    asbb             ba(sss)
+.Exit                               method    -                -
+.GetDefaultTarget                   method    -                s
+.GetJob                             method    u                o
+.GetUnit                            method    s                o</code></pre>
+<p>Аналогичная операция с помощью утилиты <code>dbus-send</code> будет выглядеть так:</p>
+<pre><code># dbus-send --system --type=method_call --print-reply --dest=org.freedesktop.systemd1 /org/freedesktop/systemd1 /org/freedesktop.DBus.Introspectable.Introspect</code></pre>
+<p>Мы обращаемся к системной шине(--system), дальше производим вызов метода(<code>--type=method_call</code>) и желаем получить ответ; с помощью флага <code>--dest</code> мы указываем обьект, к которому отправляем этот вызов. Дальше мы указываем путь внутри этого обьекта(<code>/org/freedesktop.DBus.Introspectable</code>) и интерфейс с методом в последнем флаге. Продемонстрируем часть вывода:</p>
+<pre><code>...
+&lt;signal name=&quot;StartupFinished&quot;&gt;
+ &lt;arg type=&quot;t&quot;/&gt;
+ &lt;arg type=&quot;t&quot;/&gt;
+ &lt;arg type=&quot;t&quot;/&gt;
+ &lt;arg type=&quot;t&quot;/&gt;
+ &lt;arg type=&quot;t&quot;/&gt;
+ &lt;arg type=&quot;t&quot;/&gt;
+&lt;/signal&gt;
+&lt;signal name=&quot;UnitFilesChanged&quot;&gt;
+&lt;/signal&gt;
+&lt;signal name=&quot;Reloading&quot;&gt;
+ &lt;arg type=&quot;b&quot;/&gt;
+&lt;/signal&gt;
+&lt;/interface&gt;
+&lt;/node&gt;</code></pre>
+<p>Какой вариант более лаконичен и удобен судить вам, но думаю что это совершенно очевидно.<br />Мы видим четыре интерфейса, которые реализуются этим обьектом. Каждый интерфейс является совокупностью методов, свойств и сигналов, также у них есть сигнатуры и возвращаемый результат. Для понимания практического применения давайте сменим дату в нашей операционной системе с помощью dbus-интерфейса timedated1.</p>
+<pre><code>$ busctl introspect org.freedesktop.timedate1 /org/freedesktop/timedate1
+NAME                                TYPE      SIGNATURE RESULT/VALUE     FLAGS
+org.freedesktop.DBus.Introspectable interface -         -                -
+.Introspect                         method    -         s                -
+org.freedesktop.DBus.Peer           interface -         -                -
+.GetMachineId                       method    -         s                -
+.Ping                               method    -         -                -
+org.freedesktop.DBus.Properties     interface -         -                -
+.Get                                method    ss        v                -
+.GetAll                             method    s         a{sv}            -
+.Set                                method    ssv       -                -
+.PropertiesChanged                  signal    sa{sv}as  -                -
+org.freedesktop.timedate1           interface -         -                -
+.SetLocalRTC                        method    bbb       -                -
+.SetNTP                             method    bb        -                -
+.SetTime                            method    xbb       -                -
+.SetTimezone                        method    sb        -                -
+.CanNTP                             property  b         true             -
+.LocalRTC                           property  b         false            emits-change
+.NTP                                property  b         true             emits-change
+.NTPSynchronized                    property  b         true             -
+.RTCTimeUSec                        property  t         1432108225000000 -
+.TimeUSec                           property  t         1432108225986680 -
+.Timezone                           property  s         &quot;Europe/Kiev&quot;    emits-change</code></pre>
+<p>Обратите внимание на свойства обьекта: текущее время, временная зона, параметры NTP-синхронизации и прочее. Нам нужен метод <code>.SetTime</code>, который принимает три параметра, описанные в сигнатуре: время в микросекундах, на которое мы должны сдвинуться; нужность авторизации; сдвиг во времени или установка времени начиная от начала эпохи.</p>
+<p>Давайте сдвинем время на 1 час вперед. Для этого воспользуемся утилитой <code>busctl</code>, а для возвращения к текущему времени — <code>dbus-send</code>.</p>
+<pre><code># busctl call org.freedesktop.timedate1 /org/freedesktop/timedate1 org.freedesktop.timedate1 SetTime xbb $((3600*1000*1000)) true false</code></pre>
+<p>Алгоритм тот же: обьект на шине, путь внутри этого обьекта, интерфейс(совпадает с именем обьекта), имя метода и параметры. Первый параметр - сдвиг времени в микросекундах, дальше мы устанавливаем время относительно текущего и не используем относительную авторизацию относительно policykit, так как выполняем запрос от суперпользователя.</p>
+<p>Посмотрим изменилось ли время c помощью dbus для единства стиля:</p>
+<pre><code>$ busctl call org.freedesktop.timedate1 /org/freedesktop/timedate1
+...
+.RTCTimeUSec                        property  t         1424552366000000 -
+.TimeUSec                           property  t         1424552366243943 -
+...
+</code></pre>
+<p>Как видим, все работает. Тепер вернем время вспять с помощью <code>dbus-send</code>:</p>
+<pre><code># dbus-send --print-reply --system --type=method_call --dest=org.freedesktop.timedate1 /org/freedesktop/timedate1 org.freedesktop.timedate1.SetTime int64:$((-3600*1000*1000))  boolean:true boolean:false</code></pre>
+<p>Прочитать больше про D-Bus API systemd можно <a href="http://www.freedesktop.org/wiki/Software/systemd/dbus/">здесь</a>. Будут полезными также <code>man D-Bus</code>, <code>man kdbus</code>, <code>man sd-bus</code>, <code>man busctl</code>.</p>
+</body>
+</html>
