@@ -127,10 +127,13 @@ _SOURCE_REALTIME_TIMESTAMP=1424541030255833
 после первой полученной ошибки. Вполне вероятно, что ситуацию можно улучшить, исправив
 утилиту просмотра (или реализовав её аналог, ориентированный именно на восстановление).
 
-Один из способов не допустить потери данных при повреждении файлов (помимо,
-разумеется, улучшения обработки ошибок) --- это передача данных на выделенную машину
-в реальном времени.
+Наконец, отметим, что больше информации о том, как работать с журналом, можно
+найти в [journalctl(1)][4], а список основных полей -- в [systemd.journal-fields(7)][5].
+Ну и сам формат `.journal`-файлов тоже вполне [документирован][6].
 
 [1]: http://www.freedesktop.org/software/systemd/man/machine-id.html
 [2]: http://ix.io/iOQ
 [3]: https://github.com/systemd/systemd/blob/master/src/journal/journalctl.c#L2161
+[4]: http://www.freedesktop.org/software/systemd/man/journalctl.html
+[5]: http://www.freedesktop.org/software/systemd/man/systemd.journal-fields.html
+[6]: https://wiki.freedesktop.org/www/Software/systemd/journal-files/
