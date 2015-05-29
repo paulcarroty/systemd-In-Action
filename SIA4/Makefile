@@ -1,4 +1,4 @@
-SOURCES = $(wildcard part*.md)
+SOURCES = $(sort $(wildcard part*.md))
 NAME = $(shell basename "$$(pwd)")
 
 .PHONY: all clean
