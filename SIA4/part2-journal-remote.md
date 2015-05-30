@@ -26,14 +26,13 @@
 
 На лог-сервере же в обоих случаях запускается [`systemd-journal-remote`][12].
 
-Опять же, в обоих случаях данные передаются по сети поверх протокола HTTP(S) в
-подробном [почти текстовом формате][13] вида `KEY=VALUE`. Данные именно в этом
-формате возвращаются командой `journalctl -o export`.
+Данные передаются по сети поверх протокола HTTP(S) в подробном [почти текстовом формате][13]
+вида `KEY=VALUE`. Именно в этом формате логи отображаются командой `journalctl -o export`.
 
 #### Способ первый --- "pull"
 
 В этом режиме на источнике логов мы запускаем самый настоящий специализированный
-HTTP-сервер [`systemd-journal-gatewayd`][10] (реализованный с помощью libmicrohttpd).
+HTTP-сервер `systemd-journal-gatewayd` (реализованный с помощью libmicrohttpd).
 
 Вообще, у этого сервера нет даже конфигурационного файла: всё достигается прямым
 редактированием юнитов. Так, например, он представляет собой обычный сокет-активируемый
@@ -145,9 +144,18 @@ hostname-части указанного URL.
 сокет-активируемый демон. Как и в предыдущем случае, для изменения порта или адреса,
 на котором будет создан сокет, предлагается напрямую править юнит `systemd-journal-remote.socket`.
 
-Вернёмся к конфигурационному файлу этой утилиты. Директива `SplitMode=` (и параметр
-командной строки `--split-mode=`) позволяет указать, как сохранять данные,
-получаемые с разных хостов. Допустимы всего два значения:
+Вернёмся к конфигурационному файлу этой утилиты.
+
+```
+[Remote]
+# SplitMode=host
+# ServerKeyFile=/etc/ssl/private/journal-remote.pem
+# ServerCertificateFile=/etc/ssl/certs/journal-remote.pem
+# TrustedCertificateFile=/etc/ssl/ca/trusted.pem
+```
+
+Директива `SplitMode=` (и параметр командной строки `--split-mode=`) позволяет
+указать, как сохранять данные, получаемые с разных хостов. Допустимы всего два значения:
 
 ----------------------------------------------------------------------------------
 Значение           Описание
@@ -158,13 +166,51 @@ hostname-части указанного URL.
 ----------------------------------------------------------------------------------
 
 Итак, нас устраивает значение по умолчанию (`host`) и стандартный порт (на этот
-раз 19532), поэтому просто запускаем `.socket`-юнит:
+раз 19532), поэтому просто активируем `.socket`-юнит:
 
 ```
 # systemctl start systemd-journal-remote.socket
 ```
 
-Теперь запустим передачу логов со второй машины.
+После этого настроим и запустим на второй машине утилиту `systemd-journal-upload`.
+Для неё уже есть готовый юнит `systemd-journal-upload.service`, не требующий изменений,
+а также конфигурационный файл `/etc/systemd/system/journal-upload.conf`.
+
+Нам остаётся всего лишь указать в этом файле (директивой `URL=`) адрес сервера,
+на который мы собственно хотим передавать данные:
+
+```
+[Upload]
+URL= http://systemd.cf:19532
+# ServerKeyFile=/etc/ssl/private/journal-upload.pem
+# ServerCertificateFile=/etc/ssl/certs/journal-upload.pem
+# TrustedCertificateFile=/etc/ssl/ca/trusted.pem
+```
+
+После чего запускаем `systemd-journal-upload` и убеждаемся, что всё работает.
+
+```
+# systemctl start systemd-journal-upload
+```
+
+Логи машины-источника:
+
+```
+<...>
+фев 21 21:35:36 server-9-20 systemd[1]: Starting Journal Remote Upload Service...
+<...>
+```
+
+Логи машины-сервера:
+
+```
+<...>
+Feb 21 18:30:10 systemd.cf systemd[1]: Listening on Journal Remote Sink Socket.
+Feb 21 18:30:10 systemd.cf systemd[1]: Starting Journal Remote Sink Socket.
+<...>
+```
+
+Как видим --- всё работает.
 
 [10]: http://www.freedesktop.org/software/systemd/man/systemd-journal-gatewayd.service.html
 [11]: http://www.freedesktop.org/software/systemd/man/systemd-journal-upload.html
