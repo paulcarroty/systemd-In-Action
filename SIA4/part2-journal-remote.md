@@ -1,63 +1,71 @@
-###2. Передача и прием логов
-Дальше поговорим о важной функции `journal`, которую мы упустили в предыдущей части — прием и передача логов. Для этого у нас есть три утилиты, встроенные в `journal`: `systemd-journal-remote`, `systemd-journal-gatewayd` и `systemd-journal-upload`.
-Cуществуют два способа передачи логов. *Первый* — когда соединение инициирует машина, которая принимает логи: `systemd-journal-remote` на этой машине инициирует соединение с демоном `systemd-journal-gatewayd` на машине, которая отдает логи. И второй, когда все наоборот: клиент отдает логи на сервер и на клиенте запускается сервис `systemd-journal-upload` для передачи логов, а на сервере `systemd-journal-remote` для приема.
 
-Продемонстрируем первый способ. Для начала запустим на сервере `systemd-remote-gatewayd`, который являет собой простой http-сервер отдающий нам логи с помощью HTTP-запросов.
-```
-server: # systemctl start systemd-journal-gatewayd.socket
-client: $ curl -H"Accept: text/plain" "http://77.41.63.43:19531/entries?boot" > remote-current-boot-export
-```
+### Возможности сетевого транспорта логов
 
-Итак, мы получили все сообщения с момента последней загрузки в текстовом формате. Попробуем получить логи в формате предназначенном для экспорта. Для этого сменим заголовок следующим образом:
-```
-$  curl -H"Accept: application/vnd.fdo.journal" "http://77.41.63.43:19531/entries?boot" > remote-current-boot-export
- % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
-                                 Dload  Upload   Total   Spent    Left  Speed
-100 15.1M    0 15.1M    0     0   918k      0 --:--:--  0:00:16 --:--:--  930k
-```
+Наверняка многие считают, что journald, в отличие от многих реализаций syslogd,
+не умеет передавать логи по сети и ограничен исключительно локальной их обработкой.
+Однако, это не совсем так. Сам по себе `systemd-journald`, действительно, ничего
+не знает про сеть и пишет либо в syslog-совместимый сокет, либо в файлы нативного
+формата. Тем не менее, в комплекте поставки systemd существуют три вспомогательные
+утилиты, с помощью которых и реализуется передача логов по сети в реальном времени
+"своими силами".
 
-Теперь получим все логи с удаленной машины с помощью `systemd-journal-remote`:
-```
-# lib/systemd/systemd-journal-remote --url=http://77.41.63.43:19531
-Received 0 descriptors
-Spawning curl http://77.41.63.43:19531/entries...
-/var/log/journal/remote/remote-77.41.63.43:19531.journal: Successfully rotated journal
-/var/log/journal/remote/remote-77.41.63.43:19531.journal: Successfully rotated journal
-```
-Читать логи journal с директории удобно с помощью команды `# journalctl -d /path/to/directory`. В `systemd-journal-remote` также есть удобный параметр `--split-mode`, который позволяет указывать как именно нужно формировать файлы журнала. По умолчанию, разбиение файлов делается по `machine-id`.
-Также нужно вспомнить об авторизации: в данном случае мы ее не используем ради простоты демонстрации, как и поддержку https.
+*Важное замечание: эти утилиты работают исключительно с логфайлами на диске (т. е.
+в нулевом приближении они похожи на `tail -f | netcat`). Поэтому для того, чтобы
+передавать логи по сети средствами journald, необходимо включить запись файлов в
+нативном формате --- хотя бы в режиме `Storage=volatile`.*
 
-Перейдем к *второму* способу передачи логов. Напомним, что в первом способе сервер забирал логи с клиента, здесь же все будет наоборот.
-Перед запуском `systemd-journal-remote` посмотрим в его конфигурационный файл `/etc/systemd/journal-remote.conf`:
-```
-[Remote]
-# SplitMode=host
-# ServerKeyFile=/etc/ssl/private/journal-remote.pem
-# ServerCertificateFile=/etc/ssl/certs/journal-remote.pem
-# TrustedCertificateFile=/etc/ssl/ca/trusted.pem
-```
-Как видно, по умолчанию файлы journal разбиваются по `machine-id`; также есть настройки аутентификации по ключу.
-Для запуска передачи логов уже есть готовый юнит `systemd-journal-upload.service`, нам всего лишь остается указать хост в конфигурационном файле(`/etc/systemd/system/journal-upload.conf`), на который собственно мы хотим передавать данные:
-```
-[Upload]
-URL= http://systemd.cf:19532
-# ServerKeyFile=/etc/ssl/private/journal-upload.pem
-# ServerCertificateFile=/etc/ssl/certs/journal-upload.pem
-# TrustedCertificateFile=/etc/ssl/ca/trusted.pem
-```
-Запускаем сервис:
-```
-# systemctl start systemctl-journal-upload
-```
+Итак, в systemd/journald существуют два способа передачи логов через сеть:
 
-Посмотрим в логи клиента и сервера:
+* достаточно необычная **pull-модель**, при которой лог-сервер инициирует соединение
+  и запрашивает данные, в то время как на самом деле сервер ([`systemd-journal-gatewayd`][10])
+  работает на источнике;
+
+* и более традиционная **push-модель**, когда лог-сервер в действительности является
+  сервером, а открывает соединение и отправляет данные машина-источник
+  (а именно утилита [`systemd-journal-upload`][11]).
+
+На лог-сервере же в обоих случаях запускается [`systemd-journal-remote`][12].
+
+Опять же, в обоих случаях данные передаются по сети поверх протокола HTTP(S) в
+подробном [почти текстовом формате][13] вида `KEY=VALUE`. Данные именно в этом
+формате возвращаются командой `journalctl -o export`.
+
+#### Способ первый --- "pull"
+
+В этом режиме на источнике логов мы запускаем самый настоящий специализированный
+HTTP-сервер [`systemd-journal-gatewayd`][10] (реализованный с помощью libmicrohttpd).
+
+Вообще, у этого сервера нет даже конфигурационного файла: всё достигается прямым
+редактированием юнитов. Так, например, он представляет собой обычный сокет-активируемый
+сервис, поэтому чтобы изменить порт, на котором он будет принимать соединения,
+следует обратиться к юниту `systemd-journal-gatewayd.socket` и изменить в нём
+значение директивы [`ListenStream=`][14]. Или, например, для того, чтобы задать
+сертификат и секретный ключ HTTPS, достаточно изменить юнит `systemd-journal-gatewayd.service`,
+дописав в командную строку демона параметры `--cert=` и `--key=`.
+
+Нас вполне устраивает стандартный порт 19531 (а настройку HTTPS для краткости мы опустим),
+поэтому сразу перейдём к запуску этого сервера на отдельной машине:
+
 ```
-фев 21 21:35:36 server-9-20 systemd[1]: Starting Journal Remote Upload Service...
-```
-```
-Feb 21 18:30:10 systemd.cf systemd[1]: Listening on Journal Remote Sink Socket.
-Feb 21 18:30:10 systemd.cf systemd[1]: Starting Journal Remote Sink Socket.
+# systemctl start systemd-journal-gatewayd.socket
 ```
 
-Как видим все работает. Рекомендуется также изучить `man systemd-journald`, `man systemd-journal-upload`, `man systemd-journal-remote`, `systemd-journal-gatewayd`.
+HTTP API этого сервера достаточно прост (и описан в документации). В частности:
 
+---------------------------------------------------------------------------------------------------
+Адрес              Ответ сервера
+------------------ --------------------------------------------------------------------------------
+`/browse`          интерактивная веб-консоль
+
+`/entries`         *(основной метод)* дамп журнала
+
+`/machine`         JSON-структура, описывающая систему (machine-id, boot-id, ...)
+
+`/fields/<field>`  список всех значений, которые принимает поле `<field>` на данном участке журнала
+---------------------------------------------------------------------------------------------------
+
+[10]: http://www.freedesktop.org/software/systemd/man/systemd-journal-gatewayd.service.html
+[11]: http://www.freedesktop.org/software/systemd/man/systemd-journal-upload.html
+[12]: http://www.freedesktop.org/software/systemd/man/systemd-journal-remote.html
+[13]: https://wiki.freedesktop.org/www/Software/systemd/export/
+[14]: http://www.freedesktop.org/software/systemd/man/systemd.socket.html#ListenStream=
